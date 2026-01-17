@@ -1,0 +1,97 @@
+name: recommendation-system
+
+on:
+    schedule:
+        - cron: "0 6 * * 1" # Mondays at 06:00 UTC
+    workflow_dispatch:
+
+permissions:
+    contents: write
+
+jobs:
+    recommend:
+        runs-on: ubuntu-latest
+        env:
+            GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+
+            - name: Install dependencies
+              run: |
+                  python -m pip install --upgrade pip
+                  pip install -r requirements.txt
+
+            - name: Generate recommendations
+              run: python main.py
+
+            - name: Find latest recommendations file
+              id: latest_json
+              run: |
+                  set -euo pipefail
+                  latest=$(ls -t data/recommendations/*.json 2>/dev/null | head -n 1)
+                  if [ -z "$latest" ]; then
+                    echo "No recommendations JSON found in data/recommendations/" >&2
+                    exit 1
+                  fi
+                  echo "path=$latest" >> "$GITHUB_OUTPUT"
+
+            - name: Update README
+              env:
+                  LATEST_JSON: ${{ steps.latest_json.outputs.path }}
+              run: |
+                  python - <<'PY'
+                  import os
+                  import re
+                  from datetime import datetime, timezone
+                  from pathlib import Path
+
+                  readme = Path("README.md")
+                  content = readme.read_text(encoding="utf-8")
+
+                  if "## Automation" not in content:
+                      content = content.rstrip() + "\n\n## Automation\n" \
+                          + "- Last recommendations run: <!-- RECO_TS_START -->not yet run<!-- RECO_TS_END -->\n" \
+                          + "- Latest recommendations file: <!-- RECO_FILE_START -->n/a<!-- RECO_FILE_END -->\n" \
+                          + "- Last Pages deploy: <!-- PAGES_TS_START -->not yet run<!-- PAGES_TS_END -->\n" \
+                          + "- Pages source JSON: <!-- PAGES_JSON_START -->n/a<!-- PAGES_JSON_END -->\n"
+
+                  replacements = {
+                      "RECO_TS": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                      "RECO_FILE": f"[{Path(os.environ['LATEST_JSON']).as_posix()}]({Path(os.environ['LATEST_JSON']).as_posix()})",
+                  }
+
+                  def replace_block(text, key, value):
+                      start = f"<!-- {key}_START -->"
+                      end = f"<!-- {key}_END -->"
+                      pattern = re.compile(f"{re.escape(start)}.*?{re.escape(end)}", re.DOTALL)
+                      if pattern.search(text):
+                          return pattern.sub(f"{start}{value}{end}", text)
+                      return text.rstrip() + f"\n- {key}: {start}{value}{end}\n"
+
+                  for key, value in replacements.items():
+                      content = replace_block(content, key, value)
+
+                  readme.write_text(content, encoding="utf-8")
+                  PY
+
+            - name: Commit and push changes
+              run: |
+                  set -euo pipefail
+                  if git status --porcelain | grep .; then
+                    git config user.name "github-actions[bot]"
+                    git config user.email "github-actions[bot]@users.noreply.github.com"
+                    git add README.md data/recommendations
+                    git commit -m "chore: automated recommendations update"
+                    git push
+                  else
+                    echo "No changes to commit."
+                  fi
