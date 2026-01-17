@@ -1,405 +1,316 @@
 import os
-import time
-import yaml
 import json
-import copy
-import requests
+import yaml
+import aiohttp
+import asyncio
+from pathlib import Path
 from dotenv import load_dotenv
 from collections import Counter
 from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlparse
 
-
-DEFAULT_CONFIG_PATH = "config/settings.yml"
-
-DEFAULT_CONFIG = {
-    "auth": {"env_var": "GH_TOKEN", "token": None},
-    "user": {"login": None},
-    "limits": {
-        "stargazers_per_repo": 50,
-        "stars_per_neighbor": 75,
-        "max_user_stars": None,
-        "min_cooccurrence": 2,
-        "request_delay_ms": 0,
-        "top_n": 10,
-    },
-    "output": {
-        "directory": "data/recommendations",
-        "filename": "recommendations.json",
-        "append_timestamp": True,
-    },
-}
 
 load_dotenv()
 
+GITHUB_API = "https://api.github.com"
 
-def load_config(path=None):
-    config_path = path or DEFAULT_CONFIG_PATH
+STAR_SNAPSHOT_DIR = Path("data/starred")
+USER_CACHE_DIR = Path("data/cache/users")
+SETTINGS_PATH = Path("config/settings.yml")
+STARGAZERS_CACHE_DIR = Path("data/cache/stargazers")
 
-    if not os.path.exists(config_path):
-        print(f"[config] Config file not found at {config_path}")
-        return None
+NEIGHBOR_FETCH_CHUNK = 10
 
-    with open(config_path, "r", encoding="utf-8") as handle:
-        try:
-            user_config = yaml.safe_load(handle) or {}
 
-        except Exception as e:
-            print(f"[config] Error parsing config file: {e}")
+def resolve_value(value):
+    if isinstance(value, str):
+        if value.startswith("${") and value.endswith("}"):
+            var_name = value[2:-1]
+            env_val = os.getenv(var_name)
+
+            if env_val is None:
+                print(f"Environment variable '{var_name}' not set")
+
+            value = env_val
+        if value.lower() in {"null", "none", ""}:
             return None
 
-    merged = copy.deepcopy(DEFAULT_CONFIG)
+        if value.isdigit():
+            return int(value)
 
-    for key, value in user_config.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key].update(value)
-        else:
-            merged[key] = value
-
-    if not merged.get("user", {}).get("login"):
-        print("[config] GitHub username must be specified in config under 'user.login'")
-        return None
-
-    print(f"[config] Loaded configuration for user {merged['user']['login']}")
-    return merged
+    return value
 
 
-def resolve_token(auth_config):
-    token = auth_config.get("token")
+def load_settings():
+    if not SETTINGS_PATH.exists():
+        print("[Settings] File not found.")
+        exit(1)
 
-    if token:
-        return token
+    raw_data = yaml.safe_load(SETTINGS_PATH.read_text())
+    if not raw_data:
+        print("[Settings] File is empty.")
+        exit(1)
 
-    env_var = auth_config.get("env_var") or "GH_TOKEN"
-    return os.getenv(env_var)
+    def resolve_dict(d):
+        return {
+            k: resolve_dict(v) if isinstance(v, dict) else resolve_value(v)
+            for k, v in d.items()
+        }
+
+    config = resolve_dict(raw_data)
+
+    if "username" not in config or config["username"] is None:
+        print("Missing required config key: 'username'")
+
+    if "use_pat" not in config:
+        config["use_pat"] = True
+
+    if not config["use_pat"]:
+        config["token"] = None
+
+    else:
+        if "token" not in config or config["token"] is None:
+            print("PAT token required when use_pat is true")
+
+    print(f"[CONFIG LOADED] User: {config['username']}, Use PAT: {config['use_pat']}")
+    return config
+
+
+CONFIG = load_settings()
+last_request_time = 0
 
 
 def build_headers(token):
-    headers = {
+    h = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "repo-recommendations/0.1",
+        "User-Agent": "repo-recommendations/0.2",
     }
-
     if token:
-        headers["Authorization"] = f"token {token}"
+        h["Authorization"] = f"token {token}"
 
-    return headers
+    return h
 
 
-def request_json(url, headers, params=None, request_delay=0.0, return_response=False):
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=30)
+async def request_json(session, url, params=None):
+    global last_request_time
 
-    except Exception as e:
-        print(f"[http] request error for {url} : {e}")
+    if not CONFIG.get("use_pat", True):
+        current_time = asyncio.get_event_loop().time()
+        time_since_last_request = current_time - last_request_time
 
-        if request_delay:
-            time.sleep(request_delay)
+        if time_since_last_request < 1.0:
+            await asyncio.sleep(1.0 - time_since_last_request)
 
+        last_request_time = asyncio.get_event_loop().time()
+
+    for attempt in range(3):
+        try:
+            async with session.get(url, params=params, timeout=30) as r:
+                if r.status == 403:
+                    reset = r.headers.get("X-RateLimit-Reset")
+
+                    if reset:
+                        sleep = max(
+                            0, int(reset) - int(datetime.now(timezone.utc).timestamp())
+                        )
+                        print(f"Rate limit hit. Sleeping {sleep}s...")
+                        await asyncio.sleep(sleep + 1)
+
+                    return None
+
+                if not r.ok:
+                    return None
+
+                return await r.json(content_type=None)
+
+        except Exception:
+            await asyncio.sleep(1.5 * (attempt + 1))
+
+    return None
+
+
+def extract_last(link):
+    if not link:
+        return 1
+
+    for part in link.split(","):
+        if 'rel="last"' in part:
+            url = part.split(";")[0].strip()[1:-1]
+            return int(parse_qs(urlparse(url).query)["page"][0])
+
+    return 1
+
+
+async def paginate(path, session):
+    url = f"{GITHUB_API}{path}"
+
+    async with session.get(url, params={"per_page": 100, "page": 1}) as first_resp:
+        if not first_resp.ok:
+            return []
+
+        first = await first_resp.json()
+        items = list(first)
+        last = extract_last(first_resp.headers.get("Link", ""))
+
+    async def fetch_page(p):
+        data = await request_json(session, url, {"per_page": 100, "page": p})
+        return data or []
+
+    tasks = [fetch_page(i) for i in range(2, last + 1)]
+    pages = await asyncio.gather(*tasks)
+
+    for p in pages:
+        items.extend(p)
+
+    return items
+
+
+async def fetch_user_starred(user, session):
+    return await paginate(f"/users/{user}/starred", session)
+
+
+def cache_user(login, data):
+    USER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    (USER_CACHE_DIR / f"{login}.json").write_text(json.dumps(data))
+
+
+def load_user(login):
+    p = USER_CACHE_DIR / f"{login}.json"
+
+    if not p.exists():
         return None
 
-    if request_delay:
-        time.sleep(request_delay)
-
-    if response.status_code == 403:
-        print(f"[http] rate limit on : {url}")
-        return None
-
-    if response.status_code == 404:
-        print(f"[http] resource not found on : {url}")
-        return None
-
-    if not response.ok:
-        preview = response.text[:200].replace("\n", " ")
-        print(f"[http] unexpected {response.status_code} for {url} : {preview}")
-
-        return None
-
-    payload = response.json()
-
-    if return_response:
-        return payload, response
-
-    return payload
+    print(f"[Cache] Using cached stars for {login}")
+    return json.loads(p.read_text())
 
 
-def paginate_api(path, limit, headers, request_delay, per_page=100):
-    if limit is not None and limit <= 0:
-        limit = None
-
-    items = []
-    per_page = per_page if not limit else min(per_page, limit)
-
-    next_url = f"https://api.github.com{path}"
-    params = {"per_page": per_page, "page": 1}
-    page = 1
-
-    while next_url:
-        if limit and len(items) >= limit:
-            break
-
-        result = request_json(
-            next_url,
-            headers,
-            params=params,
-            request_delay=request_delay,
-            return_response=True,
-        )
-
-        if not result:
-            print(f"[paginate] stopping at page {page} for {path} (no data)")
-            break
-
-        data, response = result
-
-        params = None
-
-        items.extend(data)
-
-        if limit and len(items) >= limit:
-            break
-
-        next_url = None
-        link_header = response.headers.get("Link", "")
-        for part in link_header.split(","):
-            section = part.strip().split(";")
-            if len(section) < 2:
-                continue
-            url_part = section[0].strip()
-            rels = section[1:]
-            if any('rel="next"' in rel for rel in rels):
-                if url_part.startswith("<") and url_part.endswith(">"):
-                    next_url = url_part[1:-1]
-                else:
-                    next_url = url_part
-                break
-
-        if not next_url:
-            print(f"[paginate] reached final page {page} for {path}")
-            break
-
-        page += 1
-
-    return items[:limit] if limit else items
-
-
-def fetch_user_starred(username, limit, headers, request_delay):
-    return paginate_api(f"/users/{username}/starred", limit, headers, request_delay)
-
-
-def fetch_repo_stargazers(repo_full_name, limit, headers, request_delay):
-    return paginate_api(
-        f"/repos/{repo_full_name}/stargazers", limit, headers, request_delay
+def cache_stargazers(repo, data):
+    STARGAZERS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    (STARGAZERS_CACHE_DIR / f"{repo.replace('/', '__')}.json").write_text(
+        json.dumps(data)
     )
 
 
-def extract_repo_metadata(repo):
-    full_name = repo.get("full_name")
+def load_stargazers(repo):
+    p = STARGAZERS_CACHE_DIR / f"{repo.replace('/', '__')}.json"
 
-    if not full_name:
+    if not p.exists():
         return None
 
-    owner = repo.get("owner", {}) or {}
+    print(f"[Cache] Using cached stargazers for {repo}")
+    return json.loads(p.read_text())
+
+
+def clean_repo(repo):
+    if repo.get("fork") and repo.get("stargazers_count", 0) < 50:
+        return None
+
+    if repo.get("stargazers_count", 0) < 5:
+        return None
 
     return {
-        "full_name": full_name,
-        "name": repo.get("name"),
-        "owner": owner.get("login"),
+        "html_url": repo["html_url"],
+        "full_name": repo["full_name"],
         "language": repo.get("language"),
-        "html_url": repo.get("html_url"),
         "description": repo.get("description"),
         "stargazers_count": repo.get("stargazers_count", 0),
     }
 
 
-def get_recommendations(config):
-    username = config["user"]["login"]
-    limits = config["limits"]
+async def neighbors_overlap(repo, session, limits, username):
+    cached = load_stargazers(repo["full_name"])
 
-    auth_config = config.get("auth", {})
-    token = resolve_token(auth_config)
+    if cached is None:
+        stargazers = await paginate(f"/repos/{repo['full_name']}/stargazers", session)
+        cache_stargazers(repo["full_name"], stargazers)
 
-    request_delay = limits.get("request_delay_ms", 0) / 1000.0
+    else:
+        stargazers = cached
 
-    headers = build_headers(token)
+    overlap = Counter()
+    logins = []
+    for u in stargazers:
+        login = u.get("login")
 
-    print(f"[build] Collecting starred repos for {username}")
+        if login and login != username:
+            logins.append(login)
 
-    max_user_stars = limits.get("max_user_stars")
-    print(
-        f"[build] Using max_user_stars={max_user_stars if max_user_stars is not None else 'ALL'}"
-    )
+        if (
+            limits.get("max_neighbors_considered") is not None
+            and len(logins) >= limits["max_neighbors_considered"]
+        ):
+            break
 
-    base_repos_raw = fetch_user_starred(
-        username, max_user_stars, headers, request_delay
-    )
-    print(
-        f"[build] Retrieved {len(base_repos_raw)} starred repos"
-        + (" (limited)" if max_user_stars else "")
-    )
+    for i in range(0, len(logins), NEIGHBOR_FETCH_CHUNK):
+        batch = logins[i : i + NEIGHBOR_FETCH_CHUNK]
 
-    base_repos = []
-    repo_metadata = {}
+        async def fetch_stars(login):
+            cached = load_user(login)
 
-    for repo in base_repos_raw:
-        meta = extract_repo_metadata(repo)
+            if cached is not None:
+                return cached
 
-        if meta:
-            base_repos.append(meta)
-            repo_metadata[meta["full_name"]] = meta
+            raw = await fetch_user_starred(login, session)
+            repos = [clean_repo(r) for r in raw if clean_repo(r)]
 
-    results = []
-    unique_recommendations = set()
+            if limits.get("stars_per_neighbor") is not None:
+                repos = repos[: limits["stars_per_neighbor"]]
 
-    for index, repo_meta in enumerate(base_repos, start=1):
-        print(f"[build] ({index}/{len(base_repos)}) {repo_meta['full_name']}")
+            cache_user(login, repos)
+            return repos
 
-        repo_name = repo_meta["full_name"]
-        stargazers = fetch_repo_stargazers(
-            repo_name, limits.get("stargazers_per_repo"), headers, request_delay
-        )
-        print(f"[build] Repo {repo_name}: fetched {len(stargazers)} stargazers")
-
-        overlap = Counter()
-        neighbors_with_data = 0
-
-        for user in stargazers:
-            login = user.get("login")
-            if not login or login == username:
-                continue
-
-            neighbor_stars_raw = fetch_user_starred(
-                login, limits.get("stars_per_neighbor"), headers, request_delay
-            )
-            neighbor_stars = []
-
-            for repo in neighbor_stars_raw:
-                meta = extract_repo_metadata(repo)
-
-                if meta:
-                    neighbor_stars.append(meta)
-                    repo_metadata.setdefault(meta["full_name"], meta)
-
-            if not neighbor_stars:
-                continue
-
-            neighbors_with_data += 1
+        results = await asyncio.gather(*[fetch_stars(l) for l in batch])
+        for repos in results:
             overlap.update(
-                repo["full_name"]
-                for repo in neighbor_stars
-                if repo["full_name"] != repo_name
+                r["full_name"] for r in repos if r["full_name"] != repo["full_name"]
             )
 
-        recommendations = select_recommendations(
-            overlap, limits, repo_metadata, unique_recommendations
-        )
-        print(
-            f"[build] Repo {repo_name} -> {len(recommendations)} recommendations (neighbors {neighbors_with_data})"
-        )
-
-        result = {
-            "source": repo_meta,
-            "stargazers_sampled": len(stargazers),
-            "neighbors_with_public_stars": neighbors_with_data,
-            "recommendations": recommendations,
-        }
-        results.append(result)
-
-    payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "user": username,
-        "stats": {
-            "source_repos_processed": len(base_repos),
-            "unique_recommendations": len(unique_recommendations),
-            "stars_per_neighbor": limits.get("stars_per_neighbor"),
-            "stargazers_per_repo": limits.get("stargazers_per_repo"),
-        },
-        "results": results,
-    }
-
-    return payload
+    return overlap
 
 
-def select_recommendations(overlap, limits, repo_metadata, unique_recommendations):
-    selected = []
-
-    if not overlap:
-        return selected
-
-    for repo_name, count in overlap.most_common():
-        if count < limits["min_cooccurrence"]:
-            break
-
-        metadata = repo_metadata.get(repo_name)
-        if not metadata:
-            continue
-
-        selected.append(
-            {
-                "full_name": metadata["full_name"],
-                "html_url": metadata["html_url"],
-                "description": metadata["description"],
-                "language": metadata["language"],
-                "stargazers_count": metadata["stargazers_count"],
-                "overlap_count": count,
-            }
-        )
-
-        unique_recommendations.add(metadata["full_name"])
-
-        if len(selected) >= limits["top_n"]:
-            break
-
-    return selected
-
-
-def get_output(output_config):
-    directory = output_config["directory"]
-    filename = output_config["filename"]
-
-    if output_config.get("append_timestamp", True):
-        stem, ext = os.path.splitext(filename)
-
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        filename = f"{stem}-{timestamp}{ext or '.json'}"
-
-    os.makedirs(directory, exist_ok=True)
-    return os.path.join(directory, filename)
-
-
-def save_json(data, filepath):
-    with open(filepath, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2)
-
-
-def main(config):
-    token = resolve_token(config.get("auth", {}))
-
-    if not token:
-        print("[config] No token found; requests will be heavily rate limited.")
-
-    limits_conf = config["limits"]
-
-    request_delay_ms = limits_conf.get("request_delay_ms", 0)
-
-    if not token and request_delay_ms == 0:
-        request_delay_ms = 1000
-
-    config["limits"]["request_delay_ms"] = request_delay_ms
-
-    payload = get_recommendations(config)
+async def main():
+    username = CONFIG["username"]
+    limits = CONFIG.get("limits", {})
+    max_workers = CONFIG.get("max_workers", 2)
 
     print(
-        f"[summary] Processed {payload['stats']['source_repos_processed']} repos; "
-        f"unique recommendations: {payload['stats']['unique_recommendations']}"
+        f"\n[START RUN] Processing for user: {username}, Use PAT: {CONFIG['use_pat']}"
     )
 
-    output_path = get_output(config["output"])
-    save_json(payload, output_path)
+    headers = build_headers(CONFIG["token"])
+    async with aiohttp.ClientSession(headers=headers) as session:
+        base = await fetch_user_starred(username, session)
+        base = [clean_repo(r) for r in base if clean_repo(r)]
 
-    print(f"[done] Saved recommendations to {output_path}")
+        repos_to_process = limits.get("repos_to_process")
+        if repos_to_process is not None and repos_to_process > 0:
+            base = base[:repos_to_process]
+
+        print(f"[INFO] Total repos to analyze: {len(base)}")
+
+        sem = asyncio.Semaphore(max_workers)
+
+        async def process(repo):
+            async with sem:
+                overlap = await neighbors_overlap(repo, session, limits, username)
+                recs = [
+                    r
+                    for r, c in overlap.most_common()
+                    if c >= limits.get("min_cooccurrence", 1)
+                ]
+                top_n = limits.get("top_n")
+                if top_n is not None:
+                    recs = recs[:top_n]
+                print(f"Processed {repo['full_name']} → {len(recs)} recommendations")
+                return repo["full_name"], recs
+
+        done = await asyncio.gather(*[process(r) for r in base])
+        print(f"\n[COMPLETE] Processed {len(done)} repos")
+
+        results = [{"repo": r, "recommendations": recs} for r, recs in done]
+        print("\n[FINAL OUTPUT]")
+        print(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":
-    config = load_config()
-    
-    main(config)
+    asyncio.run(main())
