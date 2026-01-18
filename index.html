@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Repo Recommendations</title>
+        <style>
+            :root {
+                color-scheme: light dark;
+                --bg: #0f172a;
+                --panel: rgba(15, 23, 42, 0.9);
+                --accent: #38bdf8;
+                --text: #f1f5f9;
+                --muted: #94a3b8;
+                font-family: "Inter", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            }
+
+            body {
+                margin: 0;
+                min-height: 100vh;
+                background: radial-gradient(circle at top, rgba(56, 189, 248, 0.2), transparent 60%),
+                    radial-gradient(circle at bottom, rgba(129, 140, 248, 0.15), transparent 55%),
+                    var(--bg);
+                color: var(--text);
+                display: flex;
+                flex-direction: column;
+            }
+
+            header {
+                padding: 2.5rem 1rem 1.5rem;
+                text-align: center;
+            }
+
+            header h1 {
+                margin: 0 0 0.25rem;
+                font-size: clamp(2rem, 4vw, 3rem);
+            }
+
+            header p {
+                margin: 0;
+                color: var(--muted);
+            }
+
+            main {
+                flex: 1;
+                display: grid;
+                grid-template-columns: minmax(18rem, 26rem) 1fr;
+                gap: 1.5rem;
+                padding: 0 1.5rem 2rem;
+            }
+
+            @media (max-width: 960px) {
+                main {
+                    grid-template-columns: 1fr;
+                }
+            }
+
+            .panel {
+                background: var(--panel);
+                border: 1px solid rgba(148, 163, 184, 0.15);
+                border-radius: 1.5rem;
+                padding: 1.5rem;
+                box-shadow: 0 20px 60px rgba(15, 23, 42, 0.5);
+                backdrop-filter: blur(8px);
+            }
+
+            .panel h2 {
+                margin-top: 0;
+                font-size: 1.3rem;
+            }
+
+            .search-box {
+                position: relative;
+                margin-bottom: 1rem;
+            }
+
+            .search-box input {
+                width: 100%;
+                padding: 0.75rem 1rem;
+                border-radius: 999px;
+                border: 1px solid rgba(148, 163, 184, 0.2);
+                background: rgba(15, 23, 42, 0.6);
+                color: var(--text);
+                font-size: 0.95rem;
+                outline: none;
+                transition: border-color 120ms ease;
+            }
+
+            .search-box input:focus {
+                border-color: var(--accent);
+            }
+
+            ul.repo-list {
+                list-style: none;
+                margin: 0;
+                padding: 0;
+                max-height: calc(100vh - 280px);
+                overflow: auto;
+                display: flex;
+                flex-direction: column;
+                gap: 0.75rem;
+            }
+
+            .repo-item {
+                border-radius: 1rem;
+                border: 1px solid rgba(148, 163, 184, 0.2);
+                padding: 0.85rem 1rem;
+                cursor: pointer;
+                transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+            }
+
+            .repo-item:hover,
+            .repo-item.active {
+                border-color: var(--accent);
+                background: rgba(56, 189, 248, 0.07);
+                transform: translateX(4px);
+            }
+
+            .repo-item small {
+                display: block;
+                color: var(--muted);
+                margin-top: 0.2rem;
+                font-size: 0.8rem;
+            }
+
+            .recommendations {
+                display: flex;
+                flex-direction: column;
+                gap: 1rem;
+            }
+
+            .summary-card {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                border-radius: 1rem;
+                border: 1px solid rgba(148, 163, 184, 0.2);
+                padding: 1rem 1.25rem;
+                background: rgba(15, 23, 42, 0.6);
+            }
+
+            .summary-card span:last-child {
+                color: var(--accent);
+                font-weight: 600;
+            }
+
+            .rec-list {
+                display: grid;
+                gap: 1rem;
+            }
+
+            .rec-card {
+                border-radius: 1rem;
+                border: 1px solid rgba(148, 163, 184, 0.2);
+                padding: 1rem 1.25rem;
+                background: rgba(15, 23, 42, 0.65);
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 1rem;
+                transition: border-color 120ms ease;
+            }
+
+            .rec-card:hover {
+                border-color: rgba(56, 189, 248, 0.7);
+            }
+
+            .rec-card a {
+                color: var(--text);
+                text-decoration: none;
+                font-weight: 600;
+                font-size: 1rem;
+            }
+
+            .rec-card a:hover {
+                color: var(--accent);
+            }
+
+            .rec-meta {
+                text-align: right;
+                color: var(--muted);
+                font-size: 0.9rem;
+            }
+
+            .empty-state {
+                border-radius: 1rem;
+                border: 1px dashed rgba(148, 163, 184, 0.4);
+                padding: 2rem;
+                text-align: center;
+                color: var(--muted);
+            }
+
+            .badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 0.35rem;
+                padding: 0.2rem 0.55rem;
+                border-radius: 999px;
+                font-size: 0.85rem;
+                border: 1px solid rgba(148, 163, 184, 0.3);
+                color: var(--muted);
+            }
+
+            .fade-enter {
+                opacity: 0;
+                transform: translateY(8px);
+            }
+
+            .fade-enter-active {
+                opacity: 1;
+                transform: translateY(0);
+                transition: opacity 160ms ease, transform 160ms ease;
+            }
+        </style>
+    </head>
+    <body>
+        <header>
+            <h1>Repo Recommendations</h1>
+            <p>Browse your starred repos and uncover adjacent projects discovered via ClickHouse.</p>
+        </header>
+        <main>
+            <section class="panel" aria-label="Source repositories">
+                <h2>Starred Repos</h2>
+                <div class="search-box">
+                    <input id="repoSearch" type="search" placeholder="Search repos…" autocomplete="off" />
+                </div>
+                <ul id="repoList" class="repo-list" role="listbox" aria-label="Repositories"></ul>
+            </section>
+            <section class="panel" aria-label="Recommendations">
+                <div class="recommendations">
+                    <div class="summary-card">
+                        <span id="selectedRepo">Choose a repo</span>
+                        <span class="badge" id="recCount">0 suggestions</span>
+                    </div>
+                    <div class="rec-list" id="recList"></div>
+                </div>
+            </section>
+        </main>
+        <script>
+            const state = {
+                username: "",
+                generatedAt: "",
+                repos: [],
+                filteredRepos: [],
+                selectedIndex: 0,
+            };
+
+            const repoListEl = document.querySelector("#repoList");
+            const recListEl = document.querySelector("#recList");
+            const selectedRepoEl = document.querySelector("#selectedRepo");
+            const recCountEl = document.querySelector("#recCount");
+            const repoSearchEl = document.querySelector("#repoSearch");
+
+            async function loadData() {
+                try {
+                    const response = await fetch("data/recommendations/latest.json", { cache: "no-cache" });
+                    const payload = await response.json();
+                    state.username = payload.username;
+                    state.generatedAt = payload.generated_at;
+                    state.repos = payload.results || [];
+                    state.filteredRepos = state.repos;
+                    renderRepoList();
+                    if (state.repos.length) {
+                        selectRepo(state.repos[0]);
+                    }
+                } catch (error) {
+                    selectedRepoEl.textContent = "Failed to load recommendations";
+                    recListEl.innerHTML = `<div class="empty-state">${error}</div>`;
+                }
+            }
+
+            function renderRepoList() {
+                const fragment = document.createDocumentFragment();
+                state.filteredRepos.forEach((repo, index) => {
+                    const item = document.createElement("li");
+                    item.className = "repo-item";
+                    item.role = "option";
+                    item.dataset.index = index;
+                    item.innerHTML = `
+                        <strong>${repo.repo}</strong>
+                        <small>${repo.recommendations.length} recommendations</small>
+                    `;
+                    if (state.repos.indexOf(repo) === state.selectedIndex) {
+                        item.classList.add("active");
+                        item.setAttribute("aria-selected", "true");
+                    }
+                    item.addEventListener("click", () => selectRepo(repo));
+                    fragment.appendChild(item);
+                });
+                repoListEl.innerHTML = "";
+                repoListEl.appendChild(fragment);
+            }
+
+            function selectRepo(repo) {
+                state.selectedIndex = state.repos.indexOf(repo);
+                selectedRepoEl.textContent = repo.repo;
+                recCountEl.textContent = `${repo.recommendations.length} suggestions`;
+                renderRepoList();
+                renderRecommendations(repo);
+            }
+
+            function renderRecommendations(repo) {
+                if (!repo.recommendations.length) {
+                    recListEl.innerHTML = `<div class="empty-state">No recommendations yet for <strong>${repo.repo}</strong>.</div>`;
+                    return;
+                }
+
+                const fragment = document.createDocumentFragment();
+                repo.recommendations.forEach((rec) => {
+                    const card = document.createElement("div");
+                    card.className = "rec-card fade-enter fade-enter-active";
+                    card.innerHTML = `
+                        <div>
+                            <a href="https://github.com/${rec.repo}" target="_blank" rel="noreferrer">${rec.repo}</a>
+                            <div class="badge">${rec.count} overlaps</div>
+                        </div>
+                        <div class="rec-meta">Click to view on GitHub</div>
+                    `;
+                    fragment.appendChild(card);
+                });
+                recListEl.innerHTML = "";
+                recListEl.appendChild(fragment);
+            }
+
+            repoSearchEl.addEventListener("input", (event) => {
+                const query = event.target.value.toLowerCase();
+                state.filteredRepos = state.repos.filter((repo) => repo.repo.toLowerCase().includes(query));
+                renderRepoList();
+            });
+
+            loadData();
+        </script>
+    </body>
+</html>
