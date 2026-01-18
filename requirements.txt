@@ -9,7 +9,6 @@ charset-normalizer
 click
 dotenv
 frozenlist
-idn
 markdown-it-py
 mdurl
 multidict
