@@ -10,10 +10,6 @@ from urllib.parse import urlencode
 from datetime import datetime, timezone
 
 
-GITHUB_TOKEN = os.getenv("GH_TOKEN")
-GH_HEADERS = {"Authorization": f"Bearer {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
-
-
 def load_config():
     config_path = Path("config/settings.yml")
 
