@@ -8,6 +8,7 @@ import concurrent.futures
 from typing import Dict, List
 from urllib.parse import urlencode
 from datetime import datetime, timezone
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 
 def load_config():
@@ -71,6 +72,8 @@ config = load_config()
 
 RECOMMENDATIONS_DIR = Path(config["paths"]["recommendations_dir"])
 LATEST_JSON = Path(config["paths"]["latest_json"])
+TEMPLATES_DIR = Path("templates")
+OUTPUT_HTML = Path("index.html")
 
 CLICKHOUSE_URL = config["clickhouse"]["url"]
 CLICKHOUSE_TABLE = config["clickhouse"]["table"]
@@ -84,6 +87,25 @@ USER_LOGIN = config["user"]["login"]
 
 progress_lock = threading.Lock()
 progress_counter = 0
+
+
+def compact_number(value):
+    if value is None:
+        return "0"
+
+    num = float(value)
+    units = ["", "K", "M", "B", "T"]
+    magnitude = 0
+
+    while abs(num) >= 1000 and magnitude < len(units) - 1:
+        num /= 1000.0
+        magnitude += 1
+
+    if magnitude == 0:
+        return f"{int(num):,}"
+
+    formatted = f"{num:.1f}".rstrip("0").rstrip(".")
+    return f"{formatted}{units[magnitude]}"
 
 
 class ClickHouseError(RuntimeError):
@@ -204,12 +226,12 @@ def process_repo(repo: str, total: int):
     return {"repo": repo, "recommendations": recs}
 
 
-def save_results(username: str, results):
+def save_results(username: str, results, generated_at: datetime):
     RECOMMENDATIONS_DIR.mkdir(parents=True, exist_ok=True)
     LATEST_JSON.write_text(
         json.dumps(
             {
-                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_at": generated_at.isoformat(),
                 "username": username,
                 "results": results,
             },
@@ -218,16 +240,46 @@ def save_results(username: str, results):
     )
 
 
+def render_html(username: str, results, generated_at: datetime):
+    env = Environment(
+        loader=FileSystemLoader(str(TEMPLATES_DIR)),
+        autoescape=select_autoescape(["html", "xml"]),
+    )
+
+    env.filters["compact"] = compact_number
+
+    template = env.get_template("index.html")
+
+    context = {
+        "username": username,
+        "generated_at": generated_at,
+        "repo_count": len(results),
+        "total_recommendations": sum(
+            len(item.get("recommendations", [])) for item in results
+        ),
+        "results": results,
+    }
+
+    OUTPUT_HTML.write_text(template.render(**context), encoding="utf-8")
+
+
 def main():
-    forked = fetch_user_starred(USER_LOGIN)  # ← switched source here
+    forked = fetch_user_starred(USER_LOGIN)
+
+    if RECENT_REPOS_LIMIT != float("inf"):
+        forked = forked[:RECENT_REPOS_LIMIT]
+
     total = len(forked)
+
+    generated_at = datetime.now(timezone.utc)
 
     print(f"[INFO] Found {total} repos. Using {MAX_WORKERS} workers.")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         results = list(ex.map(lambda r: process_repo(r, total), forked))
 
-    save_results(USER_LOGIN, results)
+    save_results(USER_LOGIN, results, generated_at)
+    render_html(USER_LOGIN, results, generated_at)
     print("[DONE] All repos processed.")
 
 

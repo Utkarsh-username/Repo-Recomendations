@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Repo Discovery</title>
+    <style>
+      :root {
+        --bg-root: #1b1b1d;
+        --bg-sidebar: #1b1b1d;
+        --bg-card: #1d1d22;
+        --bg-card-hover: #18181b;
+
+        --border: #27272a;
+        --border-hover: #3f3f46;
+
+        --fg-primary: #e4e4e7;
+        --fg-secondary: #a1a1aa;
+        --fg-muted: #71717a;
+        --accent: #8b5cf6;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background-color: var(--bg-root);
+        color: var(--fg-primary);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        height: 100vh;
+        display: flex;
+        overflow: hidden;
+        font-size: 14px;
+      }
+
+      .layout {
+        display: flex;
+        width: 100%;
+        height: 100%;
+      }
+
+      /* --- Sidebar --- */
+      .sidebar {
+        width: 260px;
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        background: var(--bg-sidebar);
+        flex-shrink: 0;
+      }
+
+      .sidebar-header {
+        height: 64px;
+        display: flex;
+        align-items: center;
+        padding: 0 1.25rem;
+        font-weight: 600;
+        border-bottom: 1px solid var(--border);
+        color: var(--fg-primary);
+        gap: 8px;
+      }
+
+      .sidebar-sub {
+        display: block;
+        font-size: 12px;
+        color: var(--fg-muted);
+        font-weight: 400;
+      }
+
+      .nav-list {
+        flex: 1;
+        overflow-y: auto;
+        padding: 0.75rem;
+        list-style: none;
+        margin: 0;
+      }
+
+      .nav-item {
+        padding: 0.6rem 0.875rem;
+        border-radius: 6px;
+        color: var(--fg-secondary);
+        cursor: pointer;
+        margin-bottom: 4px;
+        transition: all 0.15s;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border: 1px solid transparent;
+      }
+
+      .nav-item:hover {
+        background: var(--bg-card-hover);
+        color: var(--fg-primary);
+        border-color: var(--border-hover);
+      }
+
+      .nav-item.active {
+        background: #27272a;
+        color: var(--fg-primary);
+        font-weight: 600;
+        border-color: var(--border);
+      }
+
+      .badge {
+        font-size: 11px;
+        background: #18181b;
+        border: 1px solid #27272a;
+        padding: 1px 6px;
+        border-radius: 99px;
+        color: var(--fg-muted);
+      }
+
+      .main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        background: var(--bg-root);
+        min-width: 0;
+      }
+
+      .top-bar {
+        height: 64px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 1.5rem;
+        background: var(--bg-root);
+        z-index: 10;
+        gap: 12px;
+      }
+
+      .page-title {
+        font-weight: 600;
+        font-size: 14px;
+        color: var(--fg-primary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-right: 1.5rem;
+      }
+
+      .meta {
+        color: var(--fg-muted);
+        font-size: 12px;
+      }
+
+      .search-container {
+        position: relative;
+        width: 320px;
+        max-width: 100%;
+      }
+
+      .search-input {
+        width: 100%;
+        background: #18181b;
+        border: 1px solid var(--border);
+        color: var(--fg-primary);
+        padding: 0.55rem 0.875rem;
+        border-radius: 8px;
+        font-size: 13px;
+        transition: all 0.15s;
+      }
+
+      .search-input:focus {
+        outline: none;
+        border-color: #52525b;
+        background: #1c1c21;
+      }
+
+      .content-area {
+        flex: 1;
+        overflow-y: auto;
+        padding: 1.25rem 1.5rem 1.5rem;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+        gap: 1rem;
+      }
+
+      .card {
+        border: 1px solid var(--border);
+        background: var(--bg-card);
+        border-radius: 10px;
+        padding: 1.1rem 1.25rem;
+        display: flex;
+        flex-direction: row;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1.25rem;
+        transition: all 0.15s;
+      }
+
+      .card:hover {
+        border-color: var(--border-hover);
+        background: var(--bg-card-hover);
+      }
+
+      .card-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .repo-link {
+        font-weight: 600;
+        color: var(--fg-primary);
+        text-decoration: none;
+        font-size: 15px;
+        word-break: break-all;
+        display: block;
+        margin-bottom: 0.5rem;
+      }
+
+      .repo-link:hover {
+        text-decoration: underline;
+      }
+
+      .stats-row {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        font-size: 12px;
+        color: var(--fg-secondary);
+        flex-wrap: wrap;
+      }
+
+      .stat-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .stat-icon {
+        opacity: 0.5;
+        width: 14px;
+        height: 14px;
+      }
+
+      .group-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 0.75rem;
+        gap: 12px;
+      }
+
+      .group-title {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 700;
+        color: var(--fg-primary);
+      }
+
+      .group-meta {
+        color: var(--fg-muted);
+        font-size: 12px;
+      }
+
+      .pill {
+        border: 1px solid var(--border);
+        padding: 6px 10px;
+        border-radius: 12px;
+        font-size: 12px;
+        color: var(--fg-secondary);
+      }
+
+      .empty-state {
+        padding: 1.25rem;
+        border: 1px dashed var(--border);
+        border-radius: 10px;
+        color: var(--fg-muted);
+        background: #19191c;
+      }
+
+      .menu-btn {
+        display: none;
+      }
+
+      .overlay {
+        display: none;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      @media (max-width: 768px) {
+        .sidebar {
+          position: fixed;
+          top: 0;
+          bottom: 0;
+          left: 0;
+          z-index: 50;
+          transform: translateX(-100%);
+          transition: transform 0.2s;
+        }
+
+        .sidebar.open {
+          transform: translateX(0);
+        }
+
+        .overlay {
+          display: block;
+          position: fixed;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.5);
+          z-index: 40;
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity 0.2s;
+        }
+
+        .overlay.open {
+          opacity: 1;
+          pointer-events: auto;
+        }
+
+        .menu-btn {
+          display: block;
+          background: none;
+          border: 1px solid var(--border);
+          color: var(--fg-primary);
+          font-size: 1.1rem;
+          cursor: pointer;
+          margin-right: 0.75rem;
+          padding: 6px 10px;
+          border-radius: 8px;
+          background: #18181b;
+        }
+
+        .top-bar {
+          height: auto;
+          flex-direction: column;
+          align-items: stretch;
+          padding: 0.75rem 1rem;
+          gap: 0.75rem;
+        }
+
+        .top-bar-title-row {
+          display: flex;
+          align-items: center;
+        }
+
+        .content-area {
+          padding: 1rem;
+        }
+
+        .search-container {
+          width: 100%;
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        .card {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 0.75rem;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="layout">
+      <div class="overlay" id="overlay"></div>
+
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+          <div>
+            <div>RepoDiscovery</div>
+            <span class="sidebar-sub">{{ username }}</span>
+          </div>
+          <span class="pill">{{ repo_count }} repos</span>
+        </div>
+        <div class="nav-list" id="nav-list">
+          {% for group in results %}
+          <div
+            class="nav-item{% if loop.first %} active{% endif %}"
+            data-nav="{{ loop.index0 }}"
+            data-search="{{ group.repo | lower }}"
+            data-label="{{ group.repo }}"
+          >
+            <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px;">
+              {{ group.repo.split('/')[-1] }}
+            </span>
+            <span class="badge">{{ group.recommendations | length }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </aside>
+
+      <div class="main">
+        <header class="top-bar">
+          <div class="top-bar-title-row">
+            <button class="menu-btn" id="menu-btn">☰</button>
+            <div>
+              <div class="page-title" id="page-title">{{ results[0].repo if results else 'No repositories' }}</div>
+              <div class="meta">Generated {{ generated_at.strftime('%Y-%m-%d %H:%M:%S UTC') }} • {{ total_recommendations }} total recommendations</div>
+            </div>
+          </div>
+          <div class="search-container">
+            <input type="text" id="search" class="search-input" placeholder="Filter repositories..." />
+          </div>
+        </header>
+
+        <div class="content-area">
+          {% for group in results %}
+          <section class="repo-section{% if not loop.first %} hidden{% endif %}" data-group="{{ loop.index0 }}">
+            <div class="group-header">
+              <div>
+                <h2 class="group-title">{{ group.repo }}</h2>
+                <div class="group-meta">{{ group.recommendations | length }} recommendations</div>
+              </div>
+              <span class="pill">{{ loop.index }}/{{ repo_count }}</span>
+            </div>
+
+            {% if group.recommendations %}
+            <div class="grid">
+              {% for rec in group.recommendations %}
+              <div class="card" data-card data-search="{{ (rec.repo ~ ' ' ~ group.repo) | lower }}">
+                <div class="card-info">
+                  <a href="https://github.com/{{ rec.repo }}" target="_blank" class="repo-link">{{ rec.repo }}</a>
+                  <div class="stats-row">
+                    <div class="stat-item" title="Stars">
+                      <svg class="stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+                      </svg>
+                      <span>{{ rec.total_stars | compact }} stars</span>
+                    </div>
+                    <div class="stat-item" title="Forks">
+                      <svg class="stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="6" y1="3" x2="6" y2="15"></line>
+                        <circle cx="18" cy="6" r="3"></circle>
+                        <circle cx="6" cy="18" r="3"></circle>
+                        <path d="M18 9a9 9 0 0 1-9 9"></path>
+                      </svg>
+                      <span>{{ rec.total_forks | compact }} forks</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+            <div class="empty-state hidden" data-empty>No matches for this filter.</div>
+            {% else %}
+            <div class="empty-state" data-empty>No recommendations yet for this repo.</div>
+            {% endif %}
+          </section>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        const navItems = Array.from(document.querySelectorAll("[data-nav]"));
+        const groups = Array.from(document.querySelectorAll("[data-group]"));
+        const searchInput = document.getElementById("search");
+        const sidebar = document.getElementById("sidebar");
+        const overlay = document.getElementById("overlay");
+        const menuBtn = document.getElementById("menu-btn");
+        const title = document.getElementById("page-title");
+
+        if (!navItems.length || !groups.length) {
+          return;
+        }
+
+        let activeIdx = 0;
+
+        const closeMenu = () => {
+          sidebar.classList.remove("open");
+          overlay.classList.remove("open");
+        };
+
+        const openMenu = () => {
+          sidebar.classList.add("open");
+          overlay.classList.add("open");
+        };
+
+        const setActive = (idx) => {
+          activeIdx = idx;
+          navItems.forEach((item, i) => item.classList.toggle("active", i === idx));
+          groups.forEach((section, i) => section.classList.toggle("hidden", i !== idx));
+
+          if (title && navItems[idx]) {
+            title.textContent = navItems[idx].dataset.label || navItems[idx].dataset.search;
+          }
+
+          filterCards();
+        };
+
+        const filterCards = () => {
+          const term = searchInput.value.trim().toLowerCase();
+          const section = groups[activeIdx];
+          if (!section) return;
+
+          const cards = Array.from(section.querySelectorAll("[data-card]"));
+          const empty = section.querySelector("[data-empty]");
+          let anyVisible = false;
+
+          cards.forEach((card) => {
+            const matches = !term || card.dataset.search.includes(term);
+            card.style.display = matches ? "" : "none";
+            if (matches) anyVisible = true;
+          });
+
+          if (empty) {
+            empty.style.display = anyVisible ? "none" : "block";
+          }
+        };
+
+        navItems.forEach((item, idx) => {
+          item.addEventListener("click", () => {
+            setActive(idx);
+            if (window.innerWidth <= 768) closeMenu();
+          });
+        });
+
+        searchInput.addEventListener("input", filterCards);
+        overlay.addEventListener("click", closeMenu);
+        menuBtn.addEventListener("click", () => {
+          if (sidebar.classList.contains("open")) {
+            closeMenu();
+          } else {
+            openMenu();
+          }
+        });
+
+        setActive(0);
+      });
+    </script>
+  </body>
+</html>
