@@ -12,7 +12,11 @@ jobs:
     recommend:
         runs-on: ubuntu-latest
         env:
-            GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+            GH_USER: ${{ vars.GH_USER || github.repository_owner }}
+            CLICKHOUSE_URL: ${{ vars.CLICKHOUSE_URL || secrets.CLICKHOUSE_URL || 'https://play.clickhouse.com' }}
+            CLICKHOUSE_TABLE: ${{ vars.CLICKHOUSE_TABLE || 'github_events' }}
+            CLICKHOUSE_USER: ${{ vars.CLICKHOUSE_USER || 'explorer' }}
+            CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || '' }}
 
         steps:
             - name: Checkout
@@ -31,7 +35,7 @@ jobs:
                   pip install -r requirements.txt
 
             - name: Generate recommendations
-              run: python main.py
+              run: python clickhouse.py
 
             - name: Find latest recommendations file
               id: latest_json
