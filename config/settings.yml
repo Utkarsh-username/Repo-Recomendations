@@ -1,18 +1,16 @@
-auth:
-  env_var: GH_TOKEN # Environment variable to read when token below is null
+clickhouse:
+  url: "https://play.clickhouse.com"
+  table: "github_events"
+  timeout: 60
+
+processing:
+  recent_repos_limit: null
+  max_workers: 4
+  top_n: 10
+
+paths:
+  recommendations_dir: "recommendations"
+  latest_json: "recommendations/latest.json"
 
 user:
-  login: spreadsheets600 # GitHub username whose starred repos drive the recommendations
-
-limits:
-  max_user_stars: null # How many stars to pull from the source user (None = all pages)
-  stargazers_per_repo: null # Max stargazers to sample per source repo
-  stars_per_neighbor: null # How many repos to fetch per neighbor user
-  min_cooccurrence: 2 # Minimum overlapping star count before a repo is suggested
-  top_n: 10 # Number of recommendations to keep per source repo
-  request_delay_ms: 0 # Optional delay between API calls (auto-increased when token missing)
-
-output:
-  directory: data/recommendations # Folder (relative to repo root) to stash JSON output
-  filename: recommendations.json # Base filename for recommendation files
-  append_timestamp: true # When true, timestamp is inserted before writing
+  login: "SpreadSheets600"
