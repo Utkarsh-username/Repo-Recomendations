@@ -10,12 +10,17 @@ from urllib.parse import urlencode
 from datetime import datetime, timezone
 
 
+GITHUB_TOKEN = os.getenv("GH_TOKEN")
+GH_HEADERS = {"Authorization": f"Bearer {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
+
+
 def load_config():
     config_path = Path("config/settings.yml")
 
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
+    config.setdefault("clickhouse", {})
     config["clickhouse"]["url"] = os.getenv("CLICKHOUSE_URL") or config[
         "clickhouse"
     ].get("url", "https://play.clickhouse.com")
@@ -28,22 +33,40 @@ def load_config():
         os.getenv("CLICKHOUSE_TIMEOUT", str(config["clickhouse"].get("timeout", 60)))
     )
 
-    config["processing"]["recent_repos_limit"] = int(
-        os.getenv(
-            "RECENT_REPOS_LIMIT",
-            str(config["processing"].get("recent_repos_limit", 10)),
+    config.setdefault("processing", {})
+
+    recent_repos_limit_value = config["processing"].get("recent_repos_limit")
+
+    if recent_repos_limit_value is None:
+        config["processing"]["recent_repos_limit"] = float("inf")
+    else:
+        config["processing"]["recent_repos_limit"] = int(
+            os.getenv("RECENT_REPOS_LIMIT", str(recent_repos_limit_value))
         )
-    )
 
-    config["processing"]["max_workers"] = int(
-        os.getenv("MAX_WORKERS", str(config["processing"].get("max_workers", 4)))
-    )
+    max_workers_value = config["processing"].get("max_workers")
 
-    config["processing"]["top_n"] = int(
-        os.getenv("TOP_N", str(config["processing"].get("top_n", 10)))
-    )
+    if max_workers_value is None:
+        config["processing"]["max_workers"] = 4
+    else:
+        config["processing"]["max_workers"] = int(
+            os.getenv("MAX_WORKERS", str(max_workers_value))
+        )
 
+    top_n_value = config["processing"].get("top_n")
+
+    if top_n_value is None:
+        config["processing"]["top_n"] = float("inf")
+    else:
+        config["processing"]["top_n"] = int(os.getenv("TOP_N", str(top_n_value)))
+
+    config.setdefault("user", {})
     config["user"]["login"] = os.getenv("GH_USER") or config["user"].get("login")
+
+    if not config["user"]["login"]:
+        raise RuntimeError(
+            "GitHub username not configured (GH_USER or config.user.login)"
+        )
 
     return config
 
@@ -71,61 +94,46 @@ class ClickHouseError(RuntimeError):
     pass
 
 
+def fetch_user_starred(username: str) -> List[str]:
+    repos = []
+    page = 1
+
+    while True:
+        url = (
+            f"https://api.github.com/users/{username}/starred?per_page=100&page={page}"
+        )
+        r = requests.get(url, timeout=20)
+
+        if r.status_code != 200:
+            raise RuntimeError(f"GitHub API error {r.status_code}: {r.text}")
+
+        batch = r.json()
+        if not batch:
+            break
+
+        repos.extend(repo["full_name"] for repo in batch)
+        page += 1
+
+    return repos
+
+
 def run_query(sql: str):
     params = {"default_format": "JSONEachRow", "user": "explorer"}
     url = f"{CLICKHOUSE_URL}/?{urlencode(params)}"
 
-    max_retries = 5
-
-    for attempt in range(max_retries):
+    for attempt in range(5):
         try:
             r = requests.post(url, data=sql.encode(), timeout=CLICKHOUSE_TIMEOUT)
-
             if r.status_code != 200:
-                if attempt < max_retries - 1:
-                    print(
-                        f"[WARN] API returned status {r.status_code}, sleeping for 3 seconds before retry {attempt + 1}/{max_retries}"
-                    )
-                    import time
-
-                    time.sleep(3)
-                    continue
-                else:
-                    raise ClickHouseError(
-                        f"[WARN] API returned status {r.status_code} after {max_retries} attempts"
-                    )
-
-            r.raise_for_status()
-
+                raise ClickHouseError(r.text)
             return [json.loads(x) for x in r.text.splitlines() if x.strip()]
-
-        except Exception as e:
-            if attempt < max_retries - 1:
-                print(
-                    f"[WARN] Attempt {attempt + 1} failed: {str(e)}, sleeping for 3 seconds before retry"
-                )
-                import time
-
-                time.sleep(3)
-            else:
-                raise ClickHouseError(str(e))
+        except Exception:
+            if attempt == 4:
+                raise
 
 
 def literal(x: str) -> str:
     return "'" + x.replace("\\", "\\\\").replace("'", "\\'") + "'"
-
-
-def fetch_user_forks(username: str):
-    sql = f"""
-        SELECT repo_name, max(created_at) AS last_forked
-        FROM {CLICKHOUSE_TABLE}
-        WHERE event_type='ForkEvent'
-          AND actor_login={literal(username)}
-        GROUP BY repo_name
-        ORDER BY last_forked DESC
-        LIMIT {RECENT_REPOS_LIMIT}
-    """
-    return [r["repo_name"] for r in run_query(sql)]
 
 
 def fetch_total_forks(repos: List[str]) -> Dict[str, int]:
@@ -163,9 +171,9 @@ def process_repo(repo: str, total: int):
 
     with progress_lock:
         progress_counter += 1
-        idx = progress_counter
+        print(f"[{progress_counter}/{total}] Processing {repo}")
 
-        print(f"[{idx}/{total}] Processing {repo}")
+    limit_clause = "" if TOP_N == float("inf") else f"LIMIT {TOP_N}"
 
     sql = f"""
         SELECT 
@@ -182,39 +190,11 @@ def process_repo(repo: str, total: int):
           AND e.repo_name != {literal(repo)}
         GROUP BY neighbor_repo
         ORDER BY forkers DESC
-        LIMIT {TOP_N}
+        {limit_clause}
     """
 
     rows = run_query(sql)
-    recs = []
-    for r in rows:
-        rec_data = {
-            "repo": r["neighbor_repo"],
-            "count": int(r["forkers"]),
-        }
-
-        repo_details_sql = f"""
-            SELECT 
-                repo_name,
-                max(created_at) AS last_event_date,
-                countIf(event_type='ForkEvent') AS forks
-            FROM {CLICKHOUSE_TABLE}
-            WHERE repo_name = {literal(r["neighbor_repo"])}
-            GROUP BY repo_name
-            LIMIT 1
-        """
-
-        details_result = run_query(repo_details_sql)
-        if details_result:
-            detail = details_result[0]
-            rec_data.update(
-                {
-                    "last_event_date": detail.get("last_event_date"),
-                    "forks": int(detail.get("forks", 0)),
-                }
-            )
-
-        recs.append(rec_data)
+    recs = [{"repo": r["neighbor_repo"], "count": int(r["forkers"])} for r in rows]
 
     star_totals = fetch_total_stars([r["repo"] for r in recs])
     fork_totals = fetch_total_forks([r["repo"] for r in recs])
@@ -222,54 +202,36 @@ def process_repo(repo: str, total: int):
     for r in recs:
         r["total_stars"] = star_totals.get(r["repo"], 0)
         r["total_forks"] = fork_totals.get(r["repo"], 0)
-
-    for r in recs:
         ts = r["total_stars"]
         r["score"] = round(r["count"] / ts, 6) if ts > 0 else 0.0
 
-    simplified_recs = []
-    for r in recs:
-        simplified_rec = {
-            "repo": r["repo"],
-            "forks": r.get("forks", 0),
-            "score": r.get("score", 0.0),
-            "last_event_date": r.get("last_event_date"),
-            "total_stars": r.get("total_stars", 0),
-        }
-        simplified_recs.append(simplified_rec)
-
-    return {"repo": repo, "recommendations": simplified_recs}
+    return {"repo": repo, "recommendations": recs}
 
 
 def save_results(username: str, results):
-    payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "username": username,
-        "results": results,
-    }
-
     RECOMMENDATIONS_DIR.mkdir(parents=True, exist_ok=True)
-    LATEST_JSON.write_text(json.dumps(payload, indent=2))
+    LATEST_JSON.write_text(
+        json.dumps(
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "username": username,
+                "results": results,
+            },
+            indent=2,
+        )
+    )
 
 
 def main():
-    username = USER_LOGIN
-    forked = fetch_user_forks(username)
-
+    forked = fetch_user_starred(USER_LOGIN)  # ← switched source here
     total = len(forked)
-    print(
-        f"[INFO] Found {total} repos. Starting parallel processing with {MAX_WORKERS} workers."
-    )
 
-    results = []
+    print(f"[INFO] Found {total} repos. Using {MAX_WORKERS} workers.")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = [ex.submit(process_repo, repo, total) for repo in forked]
+        results = list(ex.map(lambda r: process_repo(r, total), forked))
 
-        for f in concurrent.futures.as_completed(futures):
-            results.append(f.result())
-
-    save_results(username, results)
+    save_results(USER_LOGIN, results)
     print("[DONE] All repos processed.")
 
 
