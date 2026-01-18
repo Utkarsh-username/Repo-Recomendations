@@ -16,7 +16,7 @@ Generate GitHub repo recommendations from your own stars and co-stargazers. Outp
 
 ## Automation
 
-- Last recommendations run: <!-- RECO_TS_START -->not yet run<!-- RECO_TS_END -->
-- Latest recommendations file: <!-- RECO_FILE_START -->n/a<!-- RECO_FILE_END -->
+- Last recommendations run: <!-- RECO_TS_START -->2026-01-18 11:48:26 UTC<!-- RECO_TS_END -->
+- Latest recommendations file: <!-- RECO_FILE_START -->[data/recommendations/latest.json](data/recommendations/latest.json)<!-- RECO_FILE_END -->
 - Last Pages deploy: <!-- PAGES_TS_START -->not yet run<!-- PAGES_TS_END -->
 - Pages source JSON: <!-- PAGES_JSON_START -->n/a<!-- PAGES_JSON_END -->
