@@ -1,316 +1,261 @@
 import os
 import json
 import yaml
-import aiohttp
-import asyncio
+import requests
+import threading
 from pathlib import Path
-from dotenv import load_dotenv
-from collections import Counter
+import concurrent.futures
+from typing import Dict, List
+from urllib.parse import urlencode
 from datetime import datetime, timezone
-from urllib.parse import parse_qs, urlparse
 
 
-load_dotenv()
+def load_config():
+    config_path = Path("config/settings.yml")
 
-GITHUB_API = "https://api.github.com"
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
 
-STAR_SNAPSHOT_DIR = Path("data/starred")
-USER_CACHE_DIR = Path("data/cache/users")
-SETTINGS_PATH = Path("config/settings.yml")
-STARGAZERS_CACHE_DIR = Path("data/cache/stargazers")
+    config["clickhouse"]["url"] = os.getenv("CLICKHOUSE_URL") or config[
+        "clickhouse"
+    ].get("url", "https://play.clickhouse.com")
 
-NEIGHBOR_FETCH_CHUNK = 10
+    config["clickhouse"]["table"] = os.getenv("CLICKHOUSE_TABLE") or config[
+        "clickhouse"
+    ].get("table", "github_events")
 
+    config["clickhouse"]["timeout"] = float(
+        os.getenv("CLICKHOUSE_TIMEOUT", str(config["clickhouse"].get("timeout", 60)))
+    )
 
-def resolve_value(value):
-    if isinstance(value, str):
-        if value.startswith("${") and value.endswith("}"):
-            var_name = value[2:-1]
-            env_val = os.getenv(var_name)
+    config["processing"]["recent_repos_limit"] = int(
+        os.getenv(
+            "RECENT_REPOS_LIMIT",
+            str(config["processing"].get("recent_repos_limit", 10)),
+        )
+    )
 
-            if env_val is None:
-                print(f"Environment variable '{var_name}' not set")
+    config["processing"]["max_workers"] = int(
+        os.getenv("MAX_WORKERS", str(config["processing"].get("max_workers", 4)))
+    )
 
-            value = env_val
-        if value.lower() in {"null", "none", ""}:
-            return None
+    config["processing"]["top_n"] = int(
+        os.getenv("TOP_N", str(config["processing"].get("top_n", 10)))
+    )
 
-        if value.isdigit():
-            return int(value)
+    config["user"]["login"] = os.getenv("GH_USER") or config["user"].get("login")
 
-    return value
-
-
-def load_settings():
-    if not SETTINGS_PATH.exists():
-        print("[Settings] File not found.")
-        exit(1)
-
-    raw_data = yaml.safe_load(SETTINGS_PATH.read_text())
-    if not raw_data:
-        print("[Settings] File is empty.")
-        exit(1)
-
-    def resolve_dict(d):
-        return {
-            k: resolve_dict(v) if isinstance(v, dict) else resolve_value(v)
-            for k, v in d.items()
-        }
-
-    config = resolve_dict(raw_data)
-
-    if "username" not in config or config["username"] is None:
-        print("Missing required config key: 'username'")
-
-    if "use_pat" not in config:
-        config["use_pat"] = True
-
-    if not config["use_pat"]:
-        config["token"] = None
-
-    else:
-        if "token" not in config or config["token"] is None:
-            print("PAT token required when use_pat is true")
-
-    print(f"[CONFIG LOADED] User: {config['username']}, Use PAT: {config['use_pat']}")
     return config
 
 
-CONFIG = load_settings()
-last_request_time = 0
+config = load_config()
+
+RECOMMENDATIONS_DIR = Path(config["paths"]["recommendations_dir"])
+LATEST_JSON = Path(config["paths"]["latest_json"])
+
+CLICKHOUSE_URL = config["clickhouse"]["url"]
+CLICKHOUSE_TABLE = config["clickhouse"]["table"]
+CLICKHOUSE_TIMEOUT = config["clickhouse"]["timeout"]
+
+RECENT_REPOS_LIMIT = config["processing"]["recent_repos_limit"]
+MAX_WORKERS = config["processing"]["max_workers"]
+TOP_N = config["processing"]["top_n"]
+
+USER_LOGIN = config["user"]["login"]
+
+progress_lock = threading.Lock()
+progress_counter = 0
 
 
-def build_headers(token):
-    h = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "repo-recommendations/0.2",
-    }
-    if token:
-        h["Authorization"] = f"token {token}"
-
-    return h
+class ClickHouseError(RuntimeError):
+    pass
 
 
-async def request_json(session, url, params=None):
-    global last_request_time
+def run_query(sql: str):
+    params = {"default_format": "JSONEachRow", "user": "explorer"}
+    url = f"{CLICKHOUSE_URL}/?{urlencode(params)}"
 
-    if not CONFIG.get("use_pat", True):
-        current_time = asyncio.get_event_loop().time()
-        time_since_last_request = current_time - last_request_time
+    max_retries = 5
 
-        if time_since_last_request < 1.0:
-            await asyncio.sleep(1.0 - time_since_last_request)
-
-        last_request_time = asyncio.get_event_loop().time()
-
-    for attempt in range(3):
+    for attempt in range(max_retries):
         try:
-            async with session.get(url, params=params, timeout=30) as r:
-                if r.status == 403:
-                    reset = r.headers.get("X-RateLimit-Reset")
+            r = requests.post(url, data=sql.encode(), timeout=CLICKHOUSE_TIMEOUT)
 
-                    if reset:
-                        sleep = max(
-                            0, int(reset) - int(datetime.now(timezone.utc).timestamp())
-                        )
-                        print(f"Rate limit hit. Sleeping {sleep}s...")
-                        await asyncio.sleep(sleep + 1)
+            if r.status_code != 200:
+                if attempt < max_retries - 1:
+                    print(
+                        f"[WARN] API returned status {r.status_code}, sleeping for 3 seconds before retry {attempt + 1}/{max_retries}"
+                    )
+                    import time
 
-                    return None
+                    time.sleep(3)
+                    continue
+                else:
+                    raise ClickHouseError(
+                        f"[WARN] API returned status {r.status_code} after {max_retries} attempts"
+                    )
 
-                if not r.ok:
-                    return None
+            r.raise_for_status()
 
-                return await r.json(content_type=None)
+            return [json.loads(x) for x in r.text.splitlines() if x.strip()]
 
-        except Exception:
-            await asyncio.sleep(1.5 * (attempt + 1))
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(
+                    f"[WARN] Attempt {attempt + 1} failed: {str(e)}, sleeping for 3 seconds before retry"
+                )
+                import time
 
-    return None
-
-
-def extract_last(link):
-    if not link:
-        return 1
-
-    for part in link.split(","):
-        if 'rel="last"' in part:
-            url = part.split(";")[0].strip()[1:-1]
-            return int(parse_qs(urlparse(url).query)["page"][0])
-
-    return 1
+                time.sleep(3)
+            else:
+                raise ClickHouseError(str(e))
 
 
-async def paginate(path, session):
-    url = f"{GITHUB_API}{path}"
-
-    async with session.get(url, params={"per_page": 100, "page": 1}) as first_resp:
-        if not first_resp.ok:
-            return []
-
-        first = await first_resp.json()
-        items = list(first)
-        last = extract_last(first_resp.headers.get("Link", ""))
-
-    async def fetch_page(p):
-        data = await request_json(session, url, {"per_page": 100, "page": p})
-        return data or []
-
-    tasks = [fetch_page(i) for i in range(2, last + 1)]
-    pages = await asyncio.gather(*tasks)
-
-    for p in pages:
-        items.extend(p)
-
-    return items
+def literal(x: str) -> str:
+    return "'" + x.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
-async def fetch_user_starred(user, session):
-    return await paginate(f"/users/{user}/starred", session)
+def fetch_user_forks(username: str):
+    sql = f"""
+        SELECT repo_name, max(created_at) AS last_forked
+        FROM {CLICKHOUSE_TABLE}
+        WHERE event_type='ForkEvent'
+          AND actor_login={literal(username)}
+        GROUP BY repo_name
+        ORDER BY last_forked DESC
+        LIMIT {RECENT_REPOS_LIMIT}
+    """
+    return [r["repo_name"] for r in run_query(sql)]
 
 
-def cache_user(login, data):
-    USER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    (USER_CACHE_DIR / f"{login}.json").write_text(json.dumps(data))
+def fetch_total_forks(repos: List[str]) -> Dict[str, int]:
+    if not repos:
+        return {}
+
+    sql = f"""
+        SELECT repo_name, count() AS total_forks
+        FROM {CLICKHOUSE_TABLE}
+        WHERE event_type='ForkEvent'
+          AND repo_name IN ({", ".join(literal(r) for r in repos)})
+        GROUP BY repo_name
+    """
+
+    return {r["repo_name"]: int(r["total_forks"]) for r in run_query(sql)}
 
 
-def load_user(login):
-    p = USER_CACHE_DIR / f"{login}.json"
+def process_repo(repo: str, total: int):
+    global progress_counter
 
-    if not p.exists():
-        return None
+    with progress_lock:
+        progress_counter += 1
+        idx = progress_counter
 
-    print(f"[Cache] Using cached stars for {login}")
-    return json.loads(p.read_text())
+        print(f"[{idx}/{total}] Processing {repo}")
 
+    sql = f"""
+        SELECT 
+            e.repo_name AS neighbor_repo,
+            countDistinct(e.actor_login) AS forkers
+        FROM {CLICKHOUSE_TABLE} e
+        INNER JOIN (
+            SELECT DISTINCT actor_login
+            FROM {CLICKHOUSE_TABLE}
+            WHERE event_type='ForkEvent'
+              AND repo_name={literal(repo)}
+        ) s USING actor_login
+        WHERE e.event_type='ForkEvent'
+          AND e.repo_name != {literal(repo)}
+        GROUP BY neighbor_repo
+        ORDER BY forkers DESC
+        LIMIT {TOP_N}
+    """
 
-def cache_stargazers(repo, data):
-    STARGAZERS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    (STARGAZERS_CACHE_DIR / f"{repo.replace('/', '__')}.json").write_text(
-        json.dumps(data)
-    )
+    rows = run_query(sql)
+    recs = []
+    for r in rows:
+        rec_data = {
+            "repo": r["neighbor_repo"],
+            "count": int(r["forkers"]),
+        }
 
+        repo_details_sql = f"""
+            SELECT 
+                repo_name,
+                min(created_at) AS first_event_date,
+                max(created_at) AS last_event_date,
+                countIf(event_type='PushEvent') AS push_events,
+                countIf(event_type='IssueCommentEvent') AS comment_events,
+                countIf(event_type='IssuesEvent') AS issue_events,
+                countIf(event_type='PullRequestEvent') AS pr_events,
+                countIf(event_type='ForkEvent') AS fork_events,
+                count() AS total_events
+            FROM {CLICKHOUSE_TABLE}
+            WHERE repo_name = {literal(r["neighbor_repo"])}
+            GROUP BY repo_name
+            LIMIT 1
+        """
 
-def load_stargazers(repo):
-    p = STARGAZERS_CACHE_DIR / f"{repo.replace('/', '__')}.json"
-
-    if not p.exists():
-        return None
-
-    print(f"[Cache] Using cached stargazers for {repo}")
-    return json.loads(p.read_text())
-
-
-def clean_repo(repo):
-    if repo.get("fork") and repo.get("stargazers_count", 0) < 50:
-        return None
-
-    if repo.get("stargazers_count", 0) < 5:
-        return None
-
-    return {
-        "html_url": repo["html_url"],
-        "full_name": repo["full_name"],
-        "language": repo.get("language"),
-        "description": repo.get("description"),
-        "stargazers_count": repo.get("stargazers_count", 0),
-    }
-
-
-async def neighbors_overlap(repo, session, limits, username):
-    cached = load_stargazers(repo["full_name"])
-
-    if cached is None:
-        stargazers = await paginate(f"/repos/{repo['full_name']}/stargazers", session)
-        cache_stargazers(repo["full_name"], stargazers)
-
-    else:
-        stargazers = cached
-
-    overlap = Counter()
-    logins = []
-    for u in stargazers:
-        login = u.get("login")
-
-        if login and login != username:
-            logins.append(login)
-
-        if (
-            limits.get("max_neighbors_considered") is not None
-            and len(logins) >= limits["max_neighbors_considered"]
-        ):
-            break
-
-    for i in range(0, len(logins), NEIGHBOR_FETCH_CHUNK):
-        batch = logins[i : i + NEIGHBOR_FETCH_CHUNK]
-
-        async def fetch_stars(login):
-            cached = load_user(login)
-
-            if cached is not None:
-                return cached
-
-            raw = await fetch_user_starred(login, session)
-            repos = [clean_repo(r) for r in raw if clean_repo(r)]
-
-            if limits.get("stars_per_neighbor") is not None:
-                repos = repos[: limits["stars_per_neighbor"]]
-
-            cache_user(login, repos)
-            return repos
-
-        results = await asyncio.gather(*[fetch_stars(l) for l in batch])
-        for repos in results:
-            overlap.update(
-                r["full_name"] for r in repos if r["full_name"] != repo["full_name"]
+        details_result = run_query(repo_details_sql)
+        if details_result:
+            detail = details_result[0]
+            rec_data.update(
+                {
+                    "first_event_date": detail.get("first_event_date"),
+                    "last_event_date": detail.get("last_event_date"),
+                    "push_events": int(detail.get("push_events", 0)),
+                    "comment_events": int(detail.get("comment_events", 0)),
+                    "issue_events": int(detail.get("issue_events", 0)),
+                    "pr_events": int(detail.get("pr_events", 0)),
+                    "fork_events": int(detail.get("fork_events", 0)),
+                    "total_events": int(detail.get("total_events", 0)),
+                }
             )
 
-    return overlap
+        recs.append(rec_data)
+
+    totals = fetch_total_forks([r["repo"] for r in recs])
+
+    for r in recs:
+        r["total_forks"] = totals.get(r["repo"], 0)
+
+    for r in recs:
+        tf = r["total_forks"]
+        r["normalized_score"] = round(r["count"] / tf, 6) if tf > 0 else 0.0
+
+    return {"repo": repo, "recommendations": recs}
 
 
-async def main():
-    username = CONFIG["username"]
-    limits = CONFIG.get("limits", {})
-    max_workers = CONFIG.get("max_workers", 2)
+def save_results(username: str, results):
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "username": username,
+        "results": results,
+    }
 
+    RECOMMENDATIONS_DIR.mkdir(parents=True, exist_ok=True)
+    LATEST_JSON.write_text(json.dumps(payload, indent=2))
+
+
+def main():
+    username = USER_LOGIN
+    forked = fetch_user_forks(username)
+
+    total = len(forked)
     print(
-        f"\n[START RUN] Processing for user: {username}, Use PAT: {CONFIG['use_pat']}"
+        f"[INFO] Found {total} repos. Starting parallel processing with {MAX_WORKERS} workers."
     )
 
-    headers = build_headers(CONFIG["token"])
-    async with aiohttp.ClientSession(headers=headers) as session:
-        base = await fetch_user_starred(username, session)
-        base = [clean_repo(r) for r in base if clean_repo(r)]
+    results = []
 
-        repos_to_process = limits.get("repos_to_process")
-        if repos_to_process is not None and repos_to_process > 0:
-            base = base[:repos_to_process]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futures = [ex.submit(process_repo, repo, total) for repo in forked]
 
-        print(f"[INFO] Total repos to analyze: {len(base)}")
+        for f in concurrent.futures.as_completed(futures):
+            results.append(f.result())
 
-        sem = asyncio.Semaphore(max_workers)
-
-        async def process(repo):
-            async with sem:
-                overlap = await neighbors_overlap(repo, session, limits, username)
-                recs = [
-                    r
-                    for r, c in overlap.most_common()
-                    if c >= limits.get("min_cooccurrence", 1)
-                ]
-                top_n = limits.get("top_n")
-                if top_n is not None:
-                    recs = recs[:top_n]
-                print(f"Processed {repo['full_name']} → {len(recs)} recommendations")
-                return repo["full_name"], recs
-
-        done = await asyncio.gather(*[process(r) for r in base])
-        print(f"\n[COMPLETE] Processed {len(done)} repos")
-
-        results = [{"repo": r, "recommendations": recs} for r, recs in done]
-        print("\n[FINAL OUTPUT]")
-        print(json.dumps(results, indent=2))
+    save_results(username, results)
+    print("[DONE] All repos processed.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
