@@ -83,22 +83,22 @@ jobs:
                   readme.write_text(content, encoding="utf-8")
                   PY
 
-                        - name: Commit and push changes
-                            env:
-                                    GH_PAT: ${{ secrets.GH_PAT }}
-                            run: |
-                                    set -euo pipefail
-                                    if git status --porcelain | grep .; then
-                                        git config user.name "github-actions[bot]"
-                                        git config user.email "github-actions[bot]@users.noreply.github.com"
+            - name: Commit and push changes
+              env:
+                  GH_PAT: ${{ secrets.GH_PAT }}
+              run: |
+                  set -euo pipefail
+                  if git status --porcelain | grep .; then
+                    git config user.name "github-actions[bot]"
+                    git config user.email "github-actions[bot]@users.noreply.github.com"
 
-                                        if [ -n "${GH_PAT:-}" ]; then
-                                            git remote set-url origin "https://${GH_PAT}@github.com/${GITHUB_REPOSITORY}"
-                                        fi
+                    if [ -n "${GH_PAT:-}" ]; then
+                      git remote set-url origin "https://${GH_PAT}@github.com/${GITHUB_REPOSITORY}"
+                    fi
 
-                                        git add README.md recommendations index.html
-                                        git commit -m "chore: automated recommendations update"
-                                        git push
-                                    else
-                                        echo "No changes to commit."
-                                    fi
+                    git add README.md recommendations index.html
+                    git commit -m "chore: automated recommendations update"
+                    git push
+                  else
+                    echo "No changes to commit."
+                  fi
