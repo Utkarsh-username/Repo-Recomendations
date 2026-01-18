@@ -1,6 +1,7 @@
 certifi
 charset-normalizer
 idna
+Jinja2
 python-dotenv
 pyyaml
 requests
