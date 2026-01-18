@@ -143,6 +143,21 @@ def fetch_total_forks(repos: List[str]) -> Dict[str, int]:
     return {r["repo_name"]: int(r["total_forks"]) for r in run_query(sql)}
 
 
+def fetch_total_stars(repos: List[str]) -> Dict[str, int]:
+    if not repos:
+        return {}
+
+    sql = f"""
+        SELECT repo_name, count() AS total_stars
+        FROM {CLICKHOUSE_TABLE}
+        WHERE event_type='WatchEvent'
+          AND repo_name IN ({", ".join(literal(r) for r in repos)})
+        GROUP BY repo_name
+    """
+
+    return {r["repo_name"]: int(r["total_stars"]) for r in run_query(sql)}
+
+
 def process_repo(repo: str, total: int):
     global progress_counter
 
@@ -181,14 +196,8 @@ def process_repo(repo: str, total: int):
         repo_details_sql = f"""
             SELECT 
                 repo_name,
-                min(created_at) AS first_event_date,
                 max(created_at) AS last_event_date,
-                countIf(event_type='PushEvent') AS push_events,
-                countIf(event_type='IssueCommentEvent') AS comment_events,
-                countIf(event_type='IssuesEvent') AS issue_events,
-                countIf(event_type='PullRequestEvent') AS pr_events,
-                countIf(event_type='ForkEvent') AS fork_events,
-                count() AS total_events
+                countIf(event_type='ForkEvent') AS forks
             FROM {CLICKHOUSE_TABLE}
             WHERE repo_name = {literal(r["neighbor_repo"])}
             GROUP BY repo_name
@@ -200,29 +209,36 @@ def process_repo(repo: str, total: int):
             detail = details_result[0]
             rec_data.update(
                 {
-                    "first_event_date": detail.get("first_event_date"),
                     "last_event_date": detail.get("last_event_date"),
-                    "push_events": int(detail.get("push_events", 0)),
-                    "comment_events": int(detail.get("comment_events", 0)),
-                    "issue_events": int(detail.get("issue_events", 0)),
-                    "pr_events": int(detail.get("pr_events", 0)),
-                    "fork_events": int(detail.get("fork_events", 0)),
-                    "total_events": int(detail.get("total_events", 0)),
+                    "forks": int(detail.get("forks", 0)),
                 }
             )
 
         recs.append(rec_data)
 
-    totals = fetch_total_forks([r["repo"] for r in recs])
+    star_totals = fetch_total_stars([r["repo"] for r in recs])
+    fork_totals = fetch_total_forks([r["repo"] for r in recs])
 
     for r in recs:
-        r["total_forks"] = totals.get(r["repo"], 0)
+        r["total_stars"] = star_totals.get(r["repo"], 0)
+        r["total_forks"] = fork_totals.get(r["repo"], 0)
 
     for r in recs:
-        tf = r["total_forks"]
-        r["normalized_score"] = round(r["count"] / tf, 6) if tf > 0 else 0.0
+        ts = r["total_stars"]
+        r["score"] = round(r["count"] / ts, 6) if ts > 0 else 0.0
 
-    return {"repo": repo, "recommendations": recs}
+    simplified_recs = []
+    for r in recs:
+        simplified_rec = {
+            "repo": r["repo"],
+            "forks": r.get("forks", 0),
+            "score": r.get("score", 0.0),
+            "last_event_date": r.get("last_event_date"),
+            "total_stars": r.get("total_stars", 0),
+        }
+        simplified_recs.append(simplified_rec)
+
+    return {"repo": repo, "recommendations": simplified_recs}
 
 
 def save_results(username: str, results):
