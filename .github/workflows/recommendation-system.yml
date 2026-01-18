@@ -2,7 +2,7 @@ name: recommendation-system
 
 on:
     schedule:
-        - cron: "0 6 * * 1" # Mondays at 06:00 UTC
+        - cron: "0 0 * * 0" # Sunday At 00:00 UTC
     workflow_dispatch:
 
 permissions:
@@ -11,12 +11,6 @@ permissions:
 jobs:
     recommend:
         runs-on: ubuntu-latest
-        env:
-            GH_USER: ${{ vars.GH_USER || github.repository_owner }}
-            CLICKHOUSE_URL: ${{ vars.CLICKHOUSE_URL || secrets.CLICKHOUSE_URL || 'https://play.clickhouse.com' }}
-            CLICKHOUSE_TABLE: ${{ vars.CLICKHOUSE_TABLE || 'github_events' }}
-            CLICKHOUSE_USER: ${{ vars.CLICKHOUSE_USER || 'explorer' }}
-            CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || '' }}
 
         steps:
             - name: Checkout
@@ -35,7 +29,7 @@ jobs:
                   pip install -r requirements.txt
 
             - name: Generate recommendations
-              run: python clickhouse.py
+              run: python main.py
 
             - name: Find latest recommendations file
               id: latest_json
